@@ -1,9 +1,33 @@
+# Molecule importer from mol2 files for Blender
+# Install this as a Blender addon
+#
+# Made by A. Casalino
+
 import bpy
 import bmesh
 import math
 import random
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
+
+# Information to enable add-on addition to Blender
+bl_info = {
+    "name": "MolViz",
+    "description": "Simple molecule creator from mol2 file",
+    "author": "acasalino",
+    "version": (0, 0, 1),
+    "blender": (3, 6, 0),
+    "warning": "",
+    "doc_url": "https://github.com/alessandrocasalino/MolViz",
+    "category": "Import-Export",
+}
+
+
+# ------------------------------------
+#             Properties
+# ------------------------------------
+
+# Single atom properties (on atom object)
 class MolViz_AtomProperties(bpy.types.PropertyGroup):
     id: bpy.props.IntProperty(default = -1)
     element: bpy.props.StringProperty(default = "")
@@ -11,6 +35,7 @@ class MolViz_AtomProperties(bpy.types.PropertyGroup):
 bpy.utils.register_class(MolViz_AtomProperties)
 bpy.types.Object.MolViz_AtomProperties = bpy.props.PointerProperty(type = MolViz_AtomProperties)
 
+# Single bond properties (on bond object)
 class MolViz_BondProperties(bpy.types.PropertyGroup):
     id: bpy.props.IntProperty(default = -1)
     source: bpy.props.PointerProperty(type = bpy.types.Object)
@@ -19,14 +44,18 @@ class MolViz_BondProperties(bpy.types.PropertyGroup):
 bpy.utils.register_class(MolViz_BondProperties)
 bpy.types.Object.MolViz_BondProperties = bpy.props.PointerProperty(type = MolViz_BondProperties)
 
+# Atom property for atoms list in the molecule properties
 class MolViz_Atom(bpy.types.PropertyGroup):
     atom: bpy.props.PointerProperty(type = bpy.types.Object)
 bpy.utils.register_class(MolViz_Atom)
 
+# Bond property for bonds list in the molecule properties
 class MolViz_Bond(bpy.types.PropertyGroup):
     bond: bpy.props.PointerProperty(type = bpy.types.Object)
 bpy.utils.register_class(MolViz_Bond)
 
+# Pair of element and its associated material
+# This is needed to have a list of all elements and their associate material
 class MolViz_ElementMaterial(bpy.types.PropertyGroup):
     element: bpy.props.StringProperty(default = "")
     material: bpy.props.PointerProperty(type = bpy.types.Material)
@@ -55,7 +84,8 @@ def molviz_add_element_material(collection, elmat):
     
     return True
 
-# Class with all general settings variables
+# Molecule properites
+# It also contains the list of atoms, bonds and materials associated to elements
 class MolViz_MoleculeProperties(bpy.types.PropertyGroup):
     
     # Atom/bond Properties
@@ -63,17 +93,22 @@ class MolViz_MoleculeProperties(bpy.types.PropertyGroup):
     bonds: bpy.props.CollectionProperty(type = MolViz_Bond)
     element_materials: bpy.props.CollectionProperty(type = MolViz_ElementMaterial)
     
-    # Internal Properties
+    # UI Properties
     change_name: bpy.props.BoolProperty(default = False,
                         description = "Rename the Molecule")
 
 bpy.utils.register_class(MolViz_MoleculeProperties)
 bpy.types.Object.MolViz_MoleculeProperties = bpy.props.PointerProperty(type = MolViz_MoleculeProperties)
 
-# Operator to open file
-class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
-    bl_idname = "molviz.file_browser"
-    bl_label = "Select file"
+
+
+# ------------------------------------
+#               Import mol2
+# ------------------------------------
+
+class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
+    bl_idname = "molviz.import_molecule"
+    bl_label = "Select file (mol2) to import molecule"
 
     def create_atom (self, parent, location = (0.,0.,0.) , r = 0.2):
         # Create an empty mesh and the object.
@@ -99,6 +134,7 @@ class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
         
         return basic_sphere
     
+    # Create a cylinder (bond) between two points
     def create_bond (self, parent, source, target, r = 0.08):
         
         x1, y1, z1 = source
@@ -181,6 +217,7 @@ class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
         # Explore the file
         lines = f.readlines()
         
+        # Check the number of molecules in the mol2
         num_mol = 0
         for line in lines:
             if "@<TRIPOS>MOLECULE" in line:
@@ -191,29 +228,35 @@ class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
             self.report({'WARNING'}, 'MolViz - No mol2 compatible molecule found.')
             return {'FINISHED'}
         
+        # Loop over the available molecules
         starting_line = 0
         for i in range(num_mol):
             
-            # Create main empty
+            # Create main molecule object (empty)
             bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.,0.,0.))
             empty = bpy.context.view_layer.objects.active
             empty.empty_display_size = 20
             empty.name = "Molecule"
             
+            # Loop over the lines to find atoms and bonds
             atoms = False
             bonds = False
             for j, line in enumerate(lines[starting_line:]):
                 sline = line.strip()
+                # If we already reached the bonds, this line ends the molecule lines
                 if "@<TRIPOS>MOLECULE" in sline and bonds:
                     starting_line = starting_line + j
                     break
+                # Start the atoms list
                 if "@<TRIPOS>ATOM" in sline:
                     atoms = True
                     continue
+                # Start the bonds list
                 if "@<TRIPOS>BOND" in sline:
                     atoms = False
                     bonds = True
                     continue
+                # Create atom
                 if atoms:
                     cline = sline.split()
                     if len(cline) >= 5:
@@ -224,16 +267,18 @@ class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
                         atom.name = atom.MolViz_AtomProperties.element
                         molviz_add_atom(empty.MolViz_MoleculeProperties.atoms, atom)
                         self.check_element_and_assign_material(empty, atom)
+                # Create bond
                 if bonds:
                     cline = sline.split()
-                    source = self.find_atom_from_id(empty.MolViz_MoleculeProperties.atoms, int(cline[1]) )
-                    target = self.find_atom_from_id(empty.MolViz_MoleculeProperties.atoms, int(cline[2]) )
-                    
-                    bond = self.create_bond(empty, source.location, target.location)
-                    bond.MolViz_BondProperties.source = source
-                    bond.MolViz_BondProperties.target = target
-                    bond.MolViz_BondProperties.id = int(cline[0])
-                    bond.name = "Bond"
+                    if len(cline) >= 4:
+                        source = self.find_atom_from_id(empty.MolViz_MoleculeProperties.atoms, int(cline[1]) )
+                        target = self.find_atom_from_id(empty.MolViz_MoleculeProperties.atoms, int(cline[2]) )
+                        
+                        bond = self.create_bond(empty, source.location, target.location)
+                        bond.MolViz_BondProperties.source = source
+                        bond.MolViz_BondProperties.target = target
+                        bond.MolViz_BondProperties.id = int(cline[0])
+                        bond.name = "Bond"
             
         
         self.report({'INFO'}, 'MolViz - Molecule created.')
@@ -244,12 +289,18 @@ class MoleculeVisualizer_FileBrowser(bpy.types.Operator, ImportHelper):
         context.window_manager.fileselect_add(self)  
         return {'RUNNING_MODAL'}
 
+
+
+# ------------------------------------
+#               UI Panel
+# ------------------------------------
+
 class MainPanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Molviz"
     
-    
+# Panel to import the file
 class PANEL_PT_MoleculeVisualizer_Input(MainPanel, bpy.types.Panel):
     bl_idname = "PANEL_PT_MoleculeVisualizer_Input"
     bl_label = "Input"
@@ -263,8 +314,9 @@ class PANEL_PT_MoleculeVisualizer_Input(MainPanel, bpy.types.Panel):
         
         layout = self.layout
         
-        layout.operator(MoleculeVisualizer_FileBrowser.bl_idname, text='', icon='FILE')
+        layout.operator(MoleculeVisualizer_ImportMolecule.bl_idname, text='Import mol2', icon='FILE')
 
+# Panel to visualize the list of molecules and their properties
 class PANEL_PT_MoleculeVisualizer_List(MainPanel, bpy.types.Panel):
     bl_idname = "PANEL_PT_MoleculeVisualizer_List"
     bl_label = "Molecules"
@@ -280,6 +332,7 @@ class PANEL_PT_MoleculeVisualizer_List(MainPanel, bpy.types.Panel):
         
         layout = self.layout
         
+        # List the molecules
         for mol in [x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)]:
             box = layout.box()
             row = box.row()
@@ -290,6 +343,8 @@ class PANEL_PT_MoleculeVisualizer_List(MainPanel, bpy.types.Panel):
                 row.label(text=mol.name, icon = "OUTLINER_DATA_MESH")
             row.prop(mol.MolViz_MoleculeProperties, "change_name", text="", icon="OUTLINER_DATA_GP_LAYER")
             
+            # Check if there are valid elements
+            # i.e. elements whose colors can be changed
             valid_elements = [x for x in mol.MolViz_MoleculeProperties.element_materials if x.material.node_tree.nodes["Principled BSDF"] ]
             if valid_elements:
                 box = box.box()
@@ -301,11 +356,10 @@ class PANEL_PT_MoleculeVisualizer_List(MainPanel, bpy.types.Panel):
                     mat = el.material
                     row.prop(mat.node_tree.nodes["Principled BSDF"].inputs[0], "default_value", text="")
 
-# Register
-
+# Operators and panel registration
 classes = (
     # Input operators
-    MoleculeVisualizer_FileBrowser,
+    MoleculeVisualizer_ImportMolecule,
     # Panel classes
     PANEL_PT_MoleculeVisualizer_Input,
     PANEL_PT_MoleculeVisualizer_List
