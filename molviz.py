@@ -14,8 +14,8 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 bl_info = {
     "name": "MolViz",
     "description": "Simple molecule creator from mol2 file",
-    "author": "acasalino",
-    "version": (0, 0, 1),
+    "author": "Alessandro Casalino",
+    "version": (0, 0, 2),
     "blender": (3, 6, 0),
     "warning": "",
     "doc_url": "https://github.com/alessandrocasalino/MolViz",
@@ -26,6 +26,23 @@ bl_info = {
 # ------------------------------------
 #             Properties
 # ------------------------------------
+
+# Global Molviz settings
+class MolViz_Settings(bpy.types.PropertyGroup):
+    # Import settings
+    same_colors: bpy.props.BoolProperty(default = True,
+                name = "Use Same Colors",
+                description = "Use the same color palette for all molecules.\nIf some molecules are already available in the scene, the first molecule colors will be used")
+    # Menu settings
+    menu_colors: bpy.props.BoolProperty(default = True,
+                name = "Show Colors",
+                description = "Show color settings in the molecule tab")
+    menu_statistics: bpy.props.BoolProperty(default = True,
+                name = "Show Statistics",
+                description = "Show statistics in the molecule tab")
+
+bpy.utils.register_class(MolViz_Settings)
+bpy.types.Scene.MolViz_Settings = bpy.props.PointerProperty(type = MolViz_Settings)
 
 # Single atom properties (on atom object)
 class MolViz_AtomProperties(bpy.types.PropertyGroup):
@@ -95,11 +112,14 @@ class MolViz_MoleculeProperties(bpy.types.PropertyGroup):
     
     # UI Properties
     change_name: bpy.props.BoolProperty(default = False,
+                        name = "Change name",
                         description = "Rename the Molecule")
+    collapsed: bpy.props.BoolProperty(default = False,
+                        name = "Collapse",
+                        description = "Collapse molecule properties")
 
 bpy.utils.register_class(MolViz_MoleculeProperties)
 bpy.types.Object.MolViz_MoleculeProperties = bpy.props.PointerProperty(type = MolViz_MoleculeProperties)
-
 
 
 # ------------------------------------
@@ -107,9 +127,17 @@ bpy.types.Object.MolViz_MoleculeProperties = bpy.props.PointerProperty(type = Mo
 # ------------------------------------
 
 class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
+    """Select file (mol2) to import molecule"""
     bl_idname = "molviz.import_molecule"
-    bl_label = "Select file (mol2) to import molecule"
-
+    bl_label = "Import Molecule"
+    bl_options = {"UNDO"}
+    
+    def lock_transforms (self, obj, location = True, rotation = True, scale = True):
+        for i in range(3):
+            obj.lock_location[i] = location
+            obj.lock_rotation[i] = rotation
+            obj.lock_scale[i] = scale
+    
     def create_atom (self, parent, location = (0.,0.,0.) , r = 0.2):
         # Create an empty mesh and the object.
         mesh = bpy.data.meshes.new('Basic_Sphere')
@@ -132,6 +160,8 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
         basic_sphere.location = location
         basic_sphere.parent = parent
         
+        self.lock_transforms(basic_sphere)
+        
         return basic_sphere
     
     # Create a cylinder (bond) between two points
@@ -146,14 +176,17 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
         
         dist = math.sqrt(dx**2 + dy**2 + dz**2)
         
+        if dist == 0:
+            return None
+        
+        phi = math.atan2(dy, dx)
+        theta = math.acos(dz/dist)
+        
         bpy.ops.mesh.primitive_cylinder_add(
             radius = r, 
             depth = dist,
             location = (dx/2 + x1, dy/2 + y1, dz/2 + z1)   
         )
-        
-        phi = math.atan2(dy, dx)
-        theta = math.acos(dz/dist)
         
         cylinder = bpy.context.object
         
@@ -161,6 +194,8 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
         cylinder.rotation_euler[2] = phi
         
         cylinder.parent = parent
+        
+        self.lock_transforms(cylinder)
         
         return cylinder
     
@@ -179,7 +214,64 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
                 return a.material
         
         return None
-
+    
+    # Remove numbers from the element string and enforce string correctness
+    def parse_element_string (self, string):
+        
+        cleaned_string = ''.join([i for i in string if not i.isdigit()])
+        first = ''
+        second = ''
+        
+        for ch in cleaned_string:
+            if not first and ch.isupper():
+                first = ch
+            elif first and ch.islower():
+                second = ch
+                break
+        
+        return first + second
+    
+    def list_materials_in_molecule (self, lines):
+        
+        elements = []
+        
+        # Loop over the lines to find atoms and bonds
+        atoms = False
+        for j, line in enumerate(lines):
+            sline = line.strip()
+            if "@<TRIPOS>ATOM" in sline:
+                atoms = True
+                continue
+            if "@<TRIPOS>BOND" in sline:
+                break
+            if atoms:
+                cline = sline.split()
+                element = self.parse_element_string(cline[1])
+                if len(cline) >= 5 and not element in elements:
+                    elements.append(element)
+        
+        return elements
+    
+    def import_materials (self, mol, elements_in_molecule = []):
+        
+        assert len(mol.MolViz_MoleculeProperties.element_materials) == 0, "Element materials were already added to the molecule"
+        
+        # Import materials from other molecules
+        num_imported = 0
+        molecules = [x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)]
+        for m in molecules:
+            element_materials = m.MolViz_MoleculeProperties.element_materials
+            valid_elements = [x for x in element_materials if x.material.node_tree.nodes["Principled BSDF"]]
+            for el in valid_elements:
+                if el.element in elements_in_molecule and not el.element in [x.element for x in mol.MolViz_MoleculeProperties.element_materials]:
+                    molviz_add_element_material(mol.MolViz_MoleculeProperties.element_materials,
+                                        (el.element, el.material) )
+                    num_imported = num_imported + 1
+        
+        print("MolViz - Imported " + str(num_imported) + " materials from other molecules")
+        
+        return        
+    
     def check_element_and_assign_material (self, mol, obj):
         
         element_materials = mol.MolViz_MoleculeProperties.element_materials
@@ -203,8 +295,26 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
             obj.data.materials.append(mat)
             
         return
-
+    
+    def clean (self, obj):
+        
+        if bpy.context.object.mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        
+        for child in obj.children:
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.data.objects[child.name].select_set(True)
+            bpy.ops.object.delete()
+        
+        bpy.ops.object.select_all(action='DESELECT')
+        bpy.data.objects[obj.name].select_set(True)
+        bpy.ops.object.delete()
+        
+        return
+    
     def execute(self, context):
+        
+        settings = bpy.context.scene.MolViz_Settings
         
         try:
             filepath = self.properties.filepath
@@ -237,6 +347,12 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
             empty = bpy.context.view_layer.objects.active
             empty.empty_display_size = 20
             empty.name = "Molecule"
+            self.lock_transforms(empty, location = False, rotation = False, scale = True)
+            
+            # Import color palette from other molecules
+            if settings.same_colors:
+                elements_in_molecule = self.list_materials_in_molecule(lines[starting_line:])
+                self.import_materials(empty, elements_in_molecule)
             
             # Loop over the lines to find atoms and bonds
             atoms = False
@@ -263,7 +379,7 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
                         location = ( float(cline[2]), float(cline[3]), float(cline[4]) )
                         atom = self.create_atom(empty, location)
                         atom.MolViz_AtomProperties.id = int(cline[0])
-                        atom.MolViz_AtomProperties.element = cline[1]
+                        atom.MolViz_AtomProperties.element = self.parse_element_string(cline[1])
                         atom.name = atom.MolViz_AtomProperties.element
                         molviz_add_atom(empty.MolViz_MoleculeProperties.atoms, atom)
                         self.check_element_and_assign_material(empty, atom)
@@ -275,6 +391,12 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
                         target = self.find_atom_from_id(empty.MolViz_MoleculeProperties.atoms, int(cline[2]) )
                         
                         bond = self.create_bond(empty, source.location, target.location)
+                        
+                        if bond == None:
+                            self.report({'ERROR'}, 'MolViz - mol2 coordinates seems corrupted.')
+                            self.clean(empty)
+                            return {'FINISHED'}
+                        
                         bond.MolViz_BondProperties.source = source
                         bond.MolViz_BondProperties.target = target
                         bond.MolViz_BondProperties.id = int(cline[0])
@@ -289,7 +411,30 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
         context.window_manager.fileselect_add(self)  
         return {'RUNNING_MODAL'}
 
+# ------------------------------------
+#           Select molecule
+# ------------------------------------
 
+class MoleculeVisualizer_SelectMolecule(bpy.types.Operator):
+    """Select molecule"""
+    bl_idname = "molviz.select_molecule"
+    bl_label = "Select Molecule"
+    bl_options = {"UNDO"}
+    
+    mol: bpy.props.StringProperty(default = "")
+    
+    def execute(self, context):
+        
+        obj = bpy.data.objects[self.mol]
+        
+        # Deselect all objects
+        bpy.ops.object.select_all(action='DESELECT')
+        
+        # Select object
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        
+        return {'FINISHED'}
 
 # ------------------------------------
 #               UI Panel
@@ -312,8 +457,11 @@ class PANEL_PT_MoleculeVisualizer_Input(MainPanel, bpy.types.Panel):
     
     def draw(self, context):
         
+        settings = context.scene.MolViz_Settings
+        
         layout = self.layout
         
+        layout.prop(settings, 'same_colors')
         layout.operator(MoleculeVisualizer_ImportMolecule.bl_idname, text='Import mol2', icon='FILE')
 
 # Panel to visualize the list of molecules and their properties
@@ -324,42 +472,73 @@ class PANEL_PT_MoleculeVisualizer_List(MainPanel, bpy.types.Panel):
     
     @classmethod
     def poll(cls, context):
-        for mol in [x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)]:
-            return True
-        return False
+        return len([x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)])
     
     def draw(self, context):
         
         layout = self.layout
         
+        settings = context.scene.MolViz_Settings
+        
+        row = layout.row(align=True)
+        row.prop(settings, "menu_colors", text="Colors", icon="COLOR")
+        row.prop(settings, "menu_statistics", text="Statistics", icon="INFO")
+        
+        menu_to_draw = settings.menu_colors or settings.menu_statistics
+        
         # List the molecules
-        for mol in [x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)]:
-            box = layout.box()
-            row = box.row()
+        molecules = [x for x in bpy.data.objects if x.type == "EMPTY" and len(x.MolViz_MoleculeProperties.atoms)]
+        for mol in molecules:
+            
+            mol_props = mol.MolViz_MoleculeProperties
+            
+            row = layout.row()
+            if menu_to_draw:
+                if not mol_props.collapsed:
+                    row.prop(mol_props, 'collapsed', text="", icon="TRIA_DOWN", emboss=False)
+                else:
+                    row.prop(mol_props, 'collapsed', text="", icon="TRIA_RIGHT", emboss=False)
             if mol.MolViz_MoleculeProperties.change_name:
-                row.label(text="", icon = "OUTLINER_DATA_MESH")
                 row.prop(mol, "name", text="")
             else:
-                row.label(text=mol.name, icon = "OUTLINER_DATA_MESH")
-            row.prop(mol.MolViz_MoleculeProperties, "change_name", text="", icon="OUTLINER_DATA_GP_LAYER")
+                row.label(text=mol.name)
+            row2 = row.row(align=True)
+            row2.prop(mol_props, "change_name", text="", icon="OUTLINER_DATA_GP_LAYER")
+            row2.operator(MoleculeVisualizer_SelectMolecule.bl_idname, text='', icon='RESTRICT_SELECT_OFF').mol = mol.name
             
-            # Check if there are valid elements
-            # i.e. elements whose colors can be changed
-            valid_elements = [x for x in mol.MolViz_MoleculeProperties.element_materials if x.material.node_tree.nodes["Principled BSDF"] ]
-            if valid_elements:
-                box = box.box()
-                box.label(text="Colors", icon = "COLOR")
-                for el in valid_elements:
-                    row = box.row()
-                    row.label(text=el.element)
-                    row.scale_x = 2
-                    mat = el.material
-                    row.prop(mat.node_tree.nodes["Principled BSDF"].inputs[0], "default_value", text="")
+            if not mol_props.collapsed and menu_to_draw:
+                # Check if there are valid elements
+                # i.e. elements whose colors can be changed
+                box = layout.box()
+                valid_elements = [x for x in mol_props.element_materials if x.material.node_tree.nodes["Principled BSDF"] ]
+                if valid_elements and settings.menu_colors:
+                    box.label(text="Colors", icon = "COLOR")
+                    col = box.column()
+                    for el in valid_elements:
+                        row = col.row()
+                        row.label(text=el.element)
+                        row.scale_x = 2
+                        mat = el.material
+                        row.prop(mat.node_tree.nodes["Principled BSDF"].inputs[0], "default_value", text="")
+                    if settings.menu_statistics:
+                        box.separator()
+                
+                # Statistics
+                if settings.menu_statistics:
+                    num_atoms = len([x for x in mol.children if x.MolViz_AtomProperties.id > -1])
+                    num_bonds = len([x for x in mol.children if x.MolViz_BondProperties.id > -1])
+                    col = box.column()
+                    col.label(text="Statistics", icon="INFO")
+                    col.label(text="Atoms: " + str(num_atoms), icon = "DOT")
+                    col.label(text="Bonds: " + str(num_bonds), icon = "DOT")
+                
 
 # Operators and panel registration
 classes = (
     # Input operators
     MoleculeVisualizer_ImportMolecule,
+    # Molecule operators
+    MoleculeVisualizer_SelectMolecule,
     # Panel classes
     PANEL_PT_MoleculeVisualizer_Input,
     PANEL_PT_MoleculeVisualizer_List
