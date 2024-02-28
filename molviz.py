@@ -15,8 +15,8 @@ bl_info = {
     "name": "MolViz",
     "description": "Simple molecule creator from mol2 file",
     "author": "Alessandro Casalino",
-    "version": (0, 0, 2),
-    "blender": (3, 6, 0),
+    "version": (0, 0, 3),
+    "blender": (4, 0, 0),
     "warning": "",
     "doc_url": "https://github.com/alessandrocasalino/MolViz",
     "category": "Import-Export",
@@ -131,6 +131,10 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
     bl_idname = "molviz.import_molecule"
     bl_label = "Import Molecule"
     bl_options = {"UNDO"}
+    
+    name: bpy.props.StringProperty(default = "",
+                        name = "Name",
+                        description = "Name of the molecule")
     
     def lock_transforms (self, obj, location = True, rotation = True, scale = True):
         for i in range(3):
@@ -346,7 +350,7 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
             bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.,0.,0.))
             empty = bpy.context.view_layer.objects.active
             empty.empty_display_size = 20
-            empty.name = "Molecule"
+            empty.name = "Molecule" if len(self.name) == 0 else self.name
             self.lock_transforms(empty, location = False, rotation = False, scale = True)
             
             # Import color palette from other molecules
@@ -410,6 +414,21 @@ class MoleculeVisualizer_ImportMolecule(bpy.types.Operator, ImportHelper):
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)  
         return {'RUNNING_MODAL'}
+    
+    def draw(self, context):
+        settings = bpy.context.scene.MolViz_Settings
+        
+        layout = self.layout
+        box = layout.box()
+        
+        box.label(text = "Import Settings", icon = "IMPORT")
+        row = box.row()
+        row.label(text = "Name:")
+        row.scale_x = 1.8
+        row.prop(self, 'name', text = "")
+        row = box.row()
+        row.label(text = "Unified Colors:")
+        row.prop(settings, 'same_colors', text = "")
 
 # ------------------------------------
 #           Select molecule
@@ -461,7 +480,6 @@ class PANEL_PT_MoleculeVisualizer_Input(MainPanel, bpy.types.Panel):
         
         layout = self.layout
         
-        layout.prop(settings, 'same_colors')
         layout.operator(MoleculeVisualizer_ImportMolecule.bl_idname, text='Import mol2', icon='FILE')
 
 # Panel to visualize the list of molecules and their properties
